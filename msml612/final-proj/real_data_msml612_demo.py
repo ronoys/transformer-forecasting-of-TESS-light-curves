@@ -22,10 +22,14 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from torch.utils.data import TensorDataset, DataLoader
 
+import os as _os
+
 torch.manual_seed(612); np.random.seed(612)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-torch.backends.cudnn.enabled = False  # cluster's pytorch module lacks libcudnn_ops_train.so;
-                                       # model is tiny so the non-cuDNN LSTM path is plenty fast
+# The cluster's pytorch module was missing libcudnn_ops_train.so, which breaks the
+# cuDNN LSTM path. Left off by default; set CUDNN=1 to try it once a module with a
+# complete cuDNN is loaded, since it is a large speedup for the LSTM on real data.
+torch.backends.cudnn.enabled = _os.environ.get("CUDNN") == "1"
 
 @dataclass
 class Config:
@@ -44,10 +48,30 @@ class Config:
     use_huber: bool = False   # flip on if flux outliers dominate MSE
     flux_scale: float = 1e3   # train in (flux-1)*1e3 units; raw deltas ~1e-3 give tiny gradients
 
-cfg = Config()
-print(f"device={DEVICE}")
+    @classmethod
+    def from_env(cls):
+        """Env overrides so a Slurm sweep never has to edit this file:
 
-import os as _os
+            sbatch --export=ALL,D_MODEL=128,N_LAYERS=6,MAX_EPOCHS=80 train.sh
+        """
+        kwargs = {}
+        for field, cast in cls.__annotations__.items():
+            raw = _os.environ.get(field.upper())
+            if raw is None:
+                continue
+            kwargs[field] = (raw.lower() in ("1", "true", "yes")) if cast is bool else cast(raw)
+        cfg = cls(**kwargs)
+        if kwargs:
+            print(f"config overrides from env: {kwargs}")
+        return cfg
+
+cfg = Config.from_env()
+print(f"device={DEVICE}")
+if DEVICE == "cuda":
+    print(f"gpu={torch.cuda.get_device_name(0)} "
+          f"mem={torch.cuda.get_device_properties(0).total_memory / 1e9:.1f}GB "
+          f"cudnn={torch.backends.cudnn.enabled}")
+
 # Executable driver runs only when TESS_RUN=1 (batch job). Plain `import tess`
 # for the data-build step imports defs + cfg without training or plotting.
 _RUN = _os.environ.get("TESS_RUN") == "1"
@@ -194,9 +218,13 @@ def make_tess_windows(
     return load_from_ronoy(out_path)
 
 if _RUN:
-    npz_path = "tess_windows.npz"
+    # zaratan_handoff.py writes data/tess_windows.npz; the older local build wrote
+    # it beside this script. Take whichever exists.
+    npz_path = next((p for p in ("data/tess_windows.npz", "tess_windows.npz")
+                     if os.path.exists(p)), "tess_windows.npz")
 
     if os.path.exists(npz_path):
+        print(f"loading handoff file: {npz_path}")
         data = load_from_ronoy(npz_path)
     else:
         data = make_tess_windows(npz_path)
@@ -222,7 +250,11 @@ def make_loader(d, split, shuffle=False):
     m = d["split"] == split
     ds = TensorDataset(torch.from_numpy(to_model_units(d["X"][m])),
                        torch.from_numpy(to_model_units(d["y"][m])))
-    return DataLoader(ds, batch_size=cfg.batch_size, shuffle=shuffle)
+    # num_workers stays 0: the whole split is already an in-memory tensor, so worker
+    # processes would only add IPC cost — and they would re-import this module's
+    # top-level driver. pin_memory still buys a faster host->device copy.
+    return DataLoader(ds, batch_size=cfg.batch_size, shuffle=shuffle,
+                      pin_memory=(DEVICE == "cuda"))
 
 if _RUN:
     sanity_check(data)
@@ -286,7 +318,9 @@ if _RUN:
 **Training loop.** AdamW, gradient clipping, early stopping on val loss, best-checkpoint restore. `use_huber` flag in config if flux outliers dominate.
 """
 
-def train(model, train_dl, val_dl, cfg, max_epochs=None, verbose=True):
+def train(model, train_dl, val_dl, cfg, max_epochs=None, verbose=True, history=None):
+    """Returns the best-val model. Pass `history` (a dict) to collect per-epoch
+    train/val loss for evaluate.py's training-curve figure."""
     model.to(DEVICE)
     if not any(p.requires_grad for p in model.parameters()):
         return model  # persistence: nothing to train
@@ -295,6 +329,7 @@ def train(model, train_dl, val_dl, cfg, max_epochs=None, verbose=True):
     best_val, best_state, bad = float("inf"), None, 0
     for epoch in range(max_epochs or cfg.max_epochs):
         model.train()
+        epoch_losses = []
         for xb, yb in train_dl:
             xb, yb = xb.to(DEVICE), yb.to(DEVICE)
             opt.zero_grad()
@@ -302,9 +337,13 @@ def train(model, train_dl, val_dl, cfg, max_epochs=None, verbose=True):
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
+            epoch_losses.append(loss.item())
         model.eval()
         with torch.no_grad():
             vl = np.mean([loss_fn(model(x.to(DEVICE)), t.to(DEVICE)).item() for x, t in val_dl])
+        if history is not None:
+            history.setdefault("train", []).append(float(np.mean(epoch_losses)))
+            history.setdefault("val", []).append(float(vl))
         if verbose: print(f"  epoch {epoch:02d} val_loss={vl:.3e}")
         if vl < best_val - 1e-9:
             best_val, best_state, bad = vl, {k: v.clone() for k, v in model.state_dict().items()}, 0
@@ -362,10 +401,11 @@ if _RUN:
     models = {"persistence": Persistence(cfg),
               "lstm": LSTMForecaster(cfg),
               "transformer": TransformerForecaster(cfg)}
-    results = {}
+    results, histories = {}, {}
     for name, m in models.items():
         print(f"--- {name} ---")
-        m = train(m, train_dl, val_dl, cfg, verbose=False)
+        histories[name] = {}
+        m = train(m, train_dl, val_dl, cfg, verbose=False, history=histories[name])
         pred, true = predict(m, test_dl)
         results[name] = (pred, true)
         print(f"{name:12s} {metrics(pred, true)}")
@@ -415,7 +455,17 @@ if _RUN:
         w = csv.DictWriter(f, fieldnames=rows[0].keys()); w.writeheader(); w.writerows(rows)
     torch.save({"state_dict": models["transformer"].state_dict(), "config": vars(cfg)},
                "transformer_best.pt")
+
+    # tic_id and X ride along so evaluate.py can do the per-star breakdown and draw
+    # the context leading into each forecast; history feeds the training curves.
     np.savez("test_predictions.npz",
              **{f"pred_{k}": v[0] for k, v in results.items()},
-             true=results["transformer"][1], transit_depth=data["transit_depth"][test_m])
-    print("saved: results_table.csv, transformer_best.pt, test_predictions.npz  ->  Vivek")
+             true=results["transformer"][1],
+             transit_depth=data["transit_depth"][test_m],
+             tic_id=data["tic_id"][test_m],
+             X=X_test)
+    with open("outputs/history.json", "w") as f:
+        json.dump({k: v for k, v in histories.items() if v}, f)
+    print("saved: results_table.csv, transformer_best.pt, test_predictions.npz, "
+          "outputs/history.json")
+    print("run `python evaluate.py` for the full metric suite and figures  ->  Vivek")
