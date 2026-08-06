@@ -1,7 +1,11 @@
-# run this ONCE on the login node (has internet) to build tess_windows.npz
-# usage: python build_data.py
+"""Local entrypoint for building the TESS handoff file.
 
-import real_data_msml612_demo as m
+Use this for a quick interactive run. On Zaratan, prefer:
+    sbatch tess.sh
+"""
 
-m.make_tess_windows("tess_windows.npz")
-print("done: tess_windows.npz built")
+from zaratan_handoff import main
+
+
+if __name__ == "__main__":
+    main()

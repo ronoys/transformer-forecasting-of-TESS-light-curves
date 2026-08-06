@@ -1,12 +1,31 @@
 #!/bin/bash
-#SBATCH --job-name=tess_forecast
-#SBATCH --partition=gpu
-#SBATCH --gres=gpu:a100_1g.5gb:1
-#SBATCH --cpus-per-task=4
-#SBATCH --time=00:30:00
-#SBATCH --output=tess_%j.out
-# #SBATCH -A <your-account>   # uncomment and set if sbalance shows more than one account
+#SBATCH --job-name=msml612-handoff
+#SBATCH --account=msml612-class
+#SBATCH --partition=standard
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32G
+#SBATCH --time=08:00:00
+#SBATCH --output=logs/handoff-%j.out
+#SBATCH --error=logs/handoff-%j.err
 
-module load pytorch/2.0.1/gcc/11.3.0/openmpi/4.1.5/cuda/12.3.0/zen2
+set -euo pipefail
 
-TESS_RUN=1 python real_data_msml612_demo.py
+module load python || true
+
+mkdir -p logs data
+
+if [ ! -d .venv ]; then
+  python -m venv .venv
+fi
+
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements-zaratan.txt
+
+python zaratan_handoff.py \
+  --out data/tess_windows.npz \
+  --n-targets 250 \
+  --max-products 4 \
+  --max-windows-per-star 500

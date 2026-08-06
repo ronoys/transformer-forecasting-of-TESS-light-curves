@@ -1,0 +1,5 @@
+numpy
+pandas
+lightkurve
+astroquery
+tqdm
