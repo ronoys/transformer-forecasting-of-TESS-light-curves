@@ -114,7 +114,14 @@ def load_lightcurve(tic_id: int, max_products: int | None, author: str | None):
 def clean_flux(lcc) -> np.ndarray:
     """Extract finite, median-normalized flux without Lightkurve's slow stitch path."""
 
-    curves = list(lcc) if hasattr(lcc, "__iter__") else [lcc]
+    if hasattr(lcc, "flux"):
+        curves = [lcc]
+    else:
+        try:
+            curves = [lcc[i] for i in range(len(lcc))]
+        except Exception:
+            curves = list(lcc) if hasattr(lcc, "__iter__") else [lcc]
+
     chunks = []
     for lc in curves:
         raw = getattr(lc.flux, "value", lc.flux)
