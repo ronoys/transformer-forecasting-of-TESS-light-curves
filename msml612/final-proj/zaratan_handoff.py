@@ -61,6 +61,38 @@ def read_tic_file(path: str | None) -> list[int] | None:
     return values
 
 
+def write_tic_file(path: str, tic_ids: list[int]) -> None:
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("\n".join(str(tic_id) for tic_id in tic_ids) + "\n")
+    print(f"Wrote {len(tic_ids)} TIC IDs to {out}")
+
+
+def resolve_tic_ids(args) -> list[int]:
+    tic_ids = read_tic_file(args.tic_file)
+    if tic_ids is not None:
+        return tic_ids
+    if args.fallback_only:
+        return FALLBACK_TIC_IDS[: args.n_targets]
+    try:
+        return fetch_toi_tic_ids(args.n_targets)
+    except Exception as exc:
+        print(f"TOI fetch failed, using fallback TICs: {exc}")
+        return FALLBACK_TIC_IDS[: args.n_targets]
+
+
+def apply_shard(tic_ids: list[int], shard_index: int | None, num_shards: int | None) -> list[int]:
+    if shard_index is None and num_shards is None:
+        return tic_ids
+    if shard_index is None or num_shards is None:
+        raise ValueError("--shard-index and --num-shards must be used together.")
+    if num_shards <= 0:
+        raise ValueError("--num-shards must be positive.")
+    if shard_index < 0 or shard_index >= num_shards:
+        raise ValueError("--shard-index must be in [0, num_shards).")
+    return tic_ids[shard_index::num_shards]
+
+
 def load_lightcurve(tic_id: int, max_products: int | None, author: str | None):
     import lightkurve as lk
 
@@ -175,16 +207,8 @@ def sanity_check(data: dict[str, np.ndarray], input_len: int, target_len: int) -
 
 
 def build_dataset(args) -> dict[str, np.ndarray]:
-    tic_ids = read_tic_file(args.tic_file)
-    if tic_ids is None:
-        if args.fallback_only:
-            tic_ids = FALLBACK_TIC_IDS[: args.n_targets]
-        else:
-            try:
-                tic_ids = fetch_toi_tic_ids(args.n_targets)
-            except Exception as exc:
-                print(f"TOI fetch failed, using fallback TICs: {exc}")
-                tic_ids = FALLBACK_TIC_IDS[: args.n_targets]
+    tic_ids = resolve_tic_ids(args)
+    tic_ids = apply_shard(tic_ids, args.shard_index, args.num_shards)
 
     print(f"Attempting {len(tic_ids)} TICs.")
     rng = np.random.default_rng(args.seed)
@@ -228,6 +252,10 @@ def build_dataset(args) -> dict[str, np.ndarray]:
         "tic_id": np.asarray(tic_all, dtype=np.int64),
         "transit_depth": np.asarray(depth_all, dtype=np.float32),
     }
+    if args.partial:
+        print(f"Partial shard complete: {data['X'].shape[0]} windows from {len(np.unique(data['tic_id']))} TICs.")
+        return data
+
     data["split"] = split_by_tic(data["tic_id"], args.seed)
     sanity_check(data, args.input_len, args.target_len)
     return data
@@ -246,11 +274,19 @@ def parse_args():
     parser.add_argument("--max-windows-per-star", type=int, default=500)
     parser.add_argument("--author", default="SPOC")
     parser.add_argument("--seed", type=int, default=612)
+    parser.add_argument("--shard-index", type=int, default=None)
+    parser.add_argument("--num-shards", type=int, default=None)
+    parser.add_argument("--partial", action="store_true", help="Write a shard file without train/val/test split.")
+    parser.add_argument("--write-tic-file", default=None, help="Write resolved TIC IDs to this path and exit.")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    if args.write_tic_file:
+        write_tic_file(args.write_tic_file, resolve_tic_ids(args))
+        return
+
     data = build_dataset(args)
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
