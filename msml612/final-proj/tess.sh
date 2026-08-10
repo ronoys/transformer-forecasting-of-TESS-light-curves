@@ -6,8 +6,8 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=8G
-#SBATCH --time=00:20:00
-#SBATCH --array=0-249%20
+#SBATCH --time=00:03:00
+#SBATCH --array=0-24%5
 #SBATCH --output=logs/handoff-%A_%a.out
 #SBATCH --error=logs/handoff-%A_%a.err
 
@@ -37,4 +37,5 @@ python zaratan_handoff.py \
   --num-shards "$SLURM_ARRAY_TASK_COUNT" \
   --partial \
   --max-products 1 \
-  --max-windows-per-star 200
+  --max-windows-per-star 100 \
+  --per-tic-timeout 45

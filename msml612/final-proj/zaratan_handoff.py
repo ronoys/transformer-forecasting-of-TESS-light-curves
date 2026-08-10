@@ -13,6 +13,7 @@ It intentionally does not train the LSTM/Transformer model.
 from __future__ import annotations
 
 import argparse
+import signal
 import urllib.parse
 from pathlib import Path
 
@@ -32,6 +33,30 @@ FALLBACK_TIC_IDS = [
     260128333,
     425997655,
 ]
+
+
+class Timeout:
+    def __init__(self, seconds: int):
+        self.seconds = seconds
+        self.previous_handler = None
+
+    def __enter__(self):
+        if self.seconds <= 0:
+            return self
+        self.previous_handler = signal.getsignal(signal.SIGALRM)
+        signal.signal(signal.SIGALRM, self._raise_timeout)
+        signal.alarm(self.seconds)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.seconds > 0:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, self.previous_handler)
+        return False
+
+    @staticmethod
+    def _raise_timeout(signum, frame):
+        raise TimeoutError("TIC processing timed out")
 
 
 def fetch_toi_tic_ids(n_targets: int) -> list[int]:
@@ -253,18 +278,19 @@ def build_dataset(args) -> dict[str, np.ndarray]:
     for idx, tic_id in enumerate(tic_ids, 1):
         print(f"[{idx}/{len(tic_ids)}] TIC {tic_id}", flush=True)
         try:
-            lcc = load_lightcurve(tic_id, max_products=args.max_products, author=args.author)
-            if lcc is None or len(lcc) == 0:
-                print("  skipped: no light curve found")
-                continue
-            flux = clean_flux(lcc)
-            X, y, tic, depth = make_windows(
-                flux,
-                tic_id=tic_id,
-                input_len=args.input_len,
-                target_len=args.target_len,
-                stride=args.stride,
-            )
+            with Timeout(args.per_tic_timeout):
+                lcc = load_lightcurve(tic_id, max_products=args.max_products, author=args.author)
+                if lcc is None or len(lcc) == 0:
+                    print("  skipped: no light curve found")
+                    continue
+                flux = clean_flux(lcc)
+                X, y, tic, depth = make_windows(
+                    flux,
+                    tic_id=tic_id,
+                    input_len=args.input_len,
+                    target_len=args.target_len,
+                    stride=args.stride,
+                )
             if args.max_windows_per_star is not None and len(X) > args.max_windows_per_star:
                 keep = np.sort(rng.choice(len(X), args.max_windows_per_star, replace=False))
                 X = [X[i] for i in keep]
@@ -317,6 +343,7 @@ def parse_args():
     parser.add_argument("--max-windows-per-star", type=int, default=500)
     parser.add_argument("--author", default="SPOC")
     parser.add_argument("--seed", type=int, default=612)
+    parser.add_argument("--per-tic-timeout", type=int, default=45, help="Seconds before skipping a slow TIC.")
     parser.add_argument("--shard-index", type=int, default=None)
     parser.add_argument("--num-shards", type=int, default=None)
     parser.add_argument("--partial", action="store_true", help="Write a shard file without train/val/test split.")

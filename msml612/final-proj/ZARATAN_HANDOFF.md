@@ -12,7 +12,7 @@ python -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements-zaratan.txt
-python zaratan_handoff.py --n-targets 250 --write-tic-file data/tic_ids.txt
+python zaratan_handoff.py --n-targets 25 --write-tic-file data/tic_ids.txt
 sbatch tess.sh
 ```
 
@@ -48,4 +48,4 @@ split          str     [N], train/val/test split by TIC
 transit_depth  float32 [N]
 ```
 
-Default scale is `250` TICs. `tess.sh` runs them as a Slurm array with up to 20 tasks at once. Each task processes a shard with `1` light curve product per TIC and up to `200` windows per TIC, so individual tasks finish much faster than the old serial job.
+Default fast scale is `25` TICs. `tess.sh` runs them as a Slurm array with up to 5 tasks at once. Each task processes one shard with `1` light curve product per TIC, up to `100` windows per TIC, and a `45` second per-TIC timeout so slow MAST requests do not hang the whole run.
