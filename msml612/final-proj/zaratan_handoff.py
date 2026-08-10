@@ -211,6 +211,14 @@ def build_dataset(args) -> dict[str, np.ndarray]:
     tic_ids = apply_shard(tic_ids, args.shard_index, args.num_shards)
 
     print(f"Attempting {len(tic_ids)} TICs.")
+    if not tic_ids and args.partial:
+        return {
+            "X": np.empty((0, args.input_len), dtype=np.float32),
+            "y": np.empty((0, args.target_len), dtype=np.float32),
+            "tic_id": np.empty((0,), dtype=np.int64),
+            "transit_depth": np.empty((0,), dtype=np.float32),
+        }
+
     rng = np.random.default_rng(args.seed)
     X_all, y_all, tic_all, depth_all = [], [], [], []
 
@@ -243,6 +251,13 @@ def build_dataset(args) -> dict[str, np.ndarray]:
         except Exception as exc:
             print(f"  skipped: {exc}")
 
+    if not X_all and args.partial:
+        return {
+            "X": np.empty((0, args.input_len), dtype=np.float32),
+            "y": np.empty((0, args.target_len), dtype=np.float32),
+            "tic_id": np.empty((0,), dtype=np.int64),
+            "transit_depth": np.empty((0,), dtype=np.float32),
+        }
     if not X_all:
         raise RuntimeError("No valid windows created.")
 
