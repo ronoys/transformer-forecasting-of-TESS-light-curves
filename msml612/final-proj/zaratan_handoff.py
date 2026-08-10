@@ -112,13 +112,34 @@ def load_lightcurve(tic_id: int, max_products: int | None, author: str | None):
 
 
 def clean_flux(lcc) -> np.ndarray:
-    lc = lcc.stitch().remove_nans().remove_outliers(sigma=8).normalize()
-    flux = np.asarray(lc.flux.value, dtype=np.float32)
-    flux = flux[np.isfinite(flux)]
-    median = np.nanmedian(flux)
-    if np.isfinite(median) and median != 0:
-        flux = flux / median
-    return flux.astype(np.float32)
+    """Extract finite, median-normalized flux without Lightkurve's slow stitch path."""
+
+    curves = list(lcc) if hasattr(lcc, "__iter__") else [lcc]
+    chunks = []
+    for lc in curves:
+        raw = getattr(lc.flux, "value", lc.flux)
+        arr = np.ma.filled(np.ma.asarray(raw), np.nan).astype(np.float32, copy=False)
+        arr = np.ravel(arr)
+        arr = arr[np.isfinite(arr)]
+        if arr.size == 0:
+            continue
+
+        median = np.nanmedian(arr)
+        if np.isfinite(median) and median != 0:
+            arr = arr / median
+
+        center = np.nanmedian(arr)
+        scatter = np.nanstd(arr)
+        if np.isfinite(scatter) and scatter > 0:
+            keep = np.abs(arr - center) <= 8 * scatter
+            arr = arr[keep]
+
+        if arr.size:
+            chunks.append(arr.astype(np.float32, copy=False))
+
+    if not chunks:
+        return np.empty((0,), dtype=np.float32)
+    return np.concatenate(chunks).astype(np.float32, copy=False)
 
 
 def make_windows(
