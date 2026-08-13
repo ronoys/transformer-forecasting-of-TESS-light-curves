@@ -118,13 +118,16 @@ def apply_shard(tic_ids: list[int], shard_index: int | None, num_shards: int | N
     return tic_ids[shard_index::num_shards]
 
 
-def load_lightcurve(tic_id: int, max_products: int | None, author: str | None):
+def load_lightcurve(tic_id: int, max_products: int | None, author: str | None, sector: int | None = None):
     import lightkurve as lk
 
     target = f"TIC {tic_id}"
     authors = [author] if author else ["SPOC", None]
     for author_name in authors:
-        search = lk.search_lightcurve(target, mission="TESS", author=author_name)
+        kwargs = {"mission": "TESS", "author": author_name}
+        if sector is not None:
+            kwargs["sector"] = sector
+        search = lk.search_lightcurve(target, **kwargs)
         if len(search) == 0:
             continue
         if max_products is not None:
