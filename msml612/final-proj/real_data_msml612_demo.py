@@ -219,9 +219,13 @@ def make_tess_windows(
 
 if _RUN:
     # zaratan_handoff.py writes data/tess_windows.npz; the older local build wrote
-    # it beside this script. Take whichever exists.
-    npz_path = next((p for p in ("data/tess_windows.npz", "tess_windows.npz")
-                     if os.path.exists(p)), "tess_windows.npz")
+    # it beside this script. DATA can override both for named runs such as run_two.
+    npz_path = _os.environ.get("DATA")
+    if npz_path and not os.path.exists(npz_path):
+        raise FileNotFoundError(f"DATA points to missing handoff file: {npz_path}")
+    if not npz_path:
+        npz_path = next((p for p in ("data/tess_windows.npz", "tess_windows.npz")
+                         if os.path.exists(p)), "tess_windows.npz")
 
     if os.path.exists(npz_path):
         print(f"loading handoff file: {npz_path}")
