@@ -43,10 +43,16 @@ class Config:
     lstm_hidden: int = 64
     batch_size: int = 128
     lr: float = 1e-3
+    weight_decay: float = 1e-2
     max_epochs: int = 40
     patience: int = 5
     use_huber: bool = False   # flip on if flux outliers dominate MSE
     flux_scale: float = 1e3   # train in (flux-1)*1e3 units; raw deltas ~1e-3 give tiny gradients
+    # Run one's transformer landed within 0.02% of persistence on every metric: the
+    # head stayed at ~0, i.e. it never learned a delta worth making. Both knobs below
+    # target that, and both are swept in sweep.sh rather than assumed.
+    anchor: bool = True       # feed the encoder x - x[-1] so the task is level-invariant
+    pool: str = "meanlast"    # mean | last | meanlast — mean over 256 steps buries the recent past
 
     @classmethod
     def from_env(cls):
@@ -75,7 +81,20 @@ if DEVICE == "cuda":
 # Executable driver runs only when TESS_RUN=1 (batch job). Plain `import tess`
 # for the data-build step imports defs + cfg without training or plotting.
 _RUN = _os.environ.get("TESS_RUN") == "1"
-_os.makedirs("outputs", exist_ok=True) if _RUN else None
+
+# Artifact root. Sweep array tasks set OUT=sweep/<tag> so parallel jobs never write
+# over each other; leaving it unset keeps the original in-place layout exactly.
+OUT = _os.environ.get("OUT", ".")
+OUTDIR = _os.path.join(OUT, "outputs")
+def out_path(*parts): return _os.path.join(OUT, *parts)
+
+# ONLY=transformer trains just that model — a sweep tuning the transformer should not
+# pay to refit the LSTM 24 times. Persistence is free and always kept as the floor.
+ONLY = [m.strip() for m in _os.environ.get("ONLY", "persistence,lstm,transformer").split(",")
+        if m.strip()]
+
+if _RUN:
+    _os.makedirs(OUTDIR, exist_ok=True)
 
 
 """### Cell 2: Data contract (Ronoy handoff) + synthetic stand-in
@@ -250,7 +269,7 @@ def sanity_check(d):
 def to_model_units(a):   return (a - 1.0) * cfg.flux_scale   # center at 0, scale up
 def from_model_units(a): return a / cfg.flux_scale + 1.0
 
-def make_loader(d, split, shuffle=False):
+def make_loader(d, split, shuffle=False, cfg=cfg):
     m = d["split"] == split
     ds = TensorDataset(torch.from_numpy(to_model_units(d["X"][m])),
                        torch.from_numpy(to_model_units(d["y"][m])))
@@ -278,14 +297,25 @@ class Persistence(nn.Module):
     def __init__(self, cfg): super().__init__(); self.T = cfg.target_len
     def forward(self, x): return x[:, -1:].repeat(1, self.T)
 
+def anchored(x, cfg):
+    """Context relative to the last observed value, when cfg.anchor is on.
+
+    Detrended flux is a level plus a small wiggle, and the level carries no
+    information about the next 32 points. Subtracting it makes every window look
+    alike to the encoder, so capacity goes to the wiggle instead of to memorising
+    per-star offsets. The anchor is added back in forward().
+    """
+    return x - x[:, -1:] if cfg.anchor else x
+
 class LSTMForecaster(nn.Module):
     def __init__(self, cfg):
         super().__init__()
+        self.cfg = cfg
         self.lstm = nn.LSTM(1, cfg.lstm_hidden, num_layers=2, batch_first=True)
         self.head = nn.Linear(cfg.lstm_hidden, cfg.target_len)
         nn.init.zeros_(self.head.weight); nn.init.zeros_(self.head.bias)  # start at persistence
     def forward(self, x):
-        out, _ = self.lstm(x.unsqueeze(-1))
+        out, _ = self.lstm(anchored(x, self.cfg).unsqueeze(-1))
         return x[:, -1:] + self.head(out[:, -1])  # forecast = last value + learned delta
 
 class PositionalEncoding(nn.Module):
@@ -302,16 +332,27 @@ class TransformerForecaster(nn.Module):
     """Linear embed -> sinusoidal PE -> encoder stack -> mean pool -> regression head."""
     def __init__(self, cfg):
         super().__init__()
+        self.cfg = cfg
         self.embed = nn.Linear(1, cfg.d_model)
         self.pe = PositionalEncoding(cfg.d_model)
         layer = nn.TransformerEncoderLayer(cfg.d_model, cfg.n_heads, cfg.ff_dim,
                                            cfg.dropout, batch_first=True, norm_first=True)
         self.encoder = nn.TransformerEncoder(layer, cfg.n_layers)
-        self.head = nn.Linear(cfg.d_model, cfg.target_len)
+        feat_dim = cfg.d_model * (2 if cfg.pool == "meanlast" else 1)
+        self.head = nn.Linear(feat_dim, cfg.target_len)
         nn.init.zeros_(self.head.weight); nn.init.zeros_(self.head.bias)  # start at persistence
+
+    def pool_features(self, h):
+        """Mean pooling alone averages the 32 steps that matter with 224 that do not,
+        so the last token — the step the forecast continues from — is available too."""
+        if self.cfg.pool == "mean":  return h.mean(dim=1)
+        if self.cfg.pool == "last":  return h[:, -1]
+        if self.cfg.pool == "meanlast": return torch.cat([h.mean(dim=1), h[:, -1]], dim=-1)
+        raise ValueError(f"unknown pool={self.cfg.pool!r}; use mean | last | meanlast")
+
     def forward(self, x):
-        h = self.encoder(self.pe(self.embed(x.unsqueeze(-1))))
-        return x[:, -1:] + self.head(h.mean(dim=1))  # forecast = last value + learned delta
+        h = self.encoder(self.pe(self.embed(anchored(x, self.cfg).unsqueeze(-1))))
+        return x[:, -1:] + self.head(self.pool_features(h))  # last value + learned delta
 
 if _RUN:
     for m in [Persistence(cfg), LSTMForecaster(cfg), TransformerForecaster(cfg)]:
@@ -326,10 +367,14 @@ def train(model, train_dl, val_dl, cfg, max_epochs=None, verbose=True, history=N
     """Returns the best-val model. Pass `history` (a dict) to collect per-epoch
     train/val loss for evaluate.py's training-curve figure."""
     model.to(DEVICE)
-    if not any(p.requires_grad for p in model.parameters()):
-        return model  # persistence: nothing to train
-    opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr)
     loss_fn = nn.HuberLoss() if cfg.use_huber else nn.MSELoss()
+    if not any(p.requires_grad for p in model.parameters()):
+        # persistence: nothing to train, but the sweep still wants its val loss as the floor
+        with torch.no_grad():
+            model.best_val_ = float(np.mean(
+                [loss_fn(model(x.to(DEVICE)), t.to(DEVICE)).item() for x, t in val_dl]))
+        return model
+    opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     best_val, best_state, bad = float("inf"), None, 0
     for epoch in range(max_epochs or cfg.max_epochs):
         model.train()
@@ -355,6 +400,8 @@ def train(model, train_dl, val_dl, cfg, max_epochs=None, verbose=True, history=N
             bad += 1
             if bad >= cfg.patience: break
     model.load_state_dict(best_state)
+    model.best_val_ = float(best_val)   # sweep.sh ranks configs on this
+    model.epochs_run_ = epoch + 1
     return model
 
 """### Cell 6: Eval harness — every model goes through this
@@ -382,7 +429,7 @@ def plot_examples(pred, true, X, idxs, title=""):
         ax.plot(range(L, L + cfg.target_len), true[i], lw=1.5, label="true")
         ax.plot(range(L, L + cfg.target_len), pred[i], lw=1.5, ls="--", label="pred")
         ax.set_xlim(L - 80, L + cfg.target_len)
-    axes.flat[0].legend(fontsize=8); fig.suptitle(title); plt.tight_layout(); fig.savefig(f"outputs/examples_{title.split(':')[0].strip().replace(' ','_')}.png", dpi=150, bbox_inches="tight"); plt.close(fig)
+    axes.flat[0].legend(fontsize=8); fig.suptitle(title); plt.tight_layout(); fig.savefig(out_path("outputs", f"examples_{title.split(':')[0].strip().replace(' ','_')}.png"), dpi=150, bbox_inches="tight"); plt.close(fig)
 
 """### Cell 7: Overfit-a-tiny-subset pipeline check (Phase 2 gate)
 **Pipeline gate.** Overfit a 5-star subset before scaling. If val loss doesn't drop steadily here, the bug is in the pipeline, not the hyperparameters.
@@ -404,18 +451,58 @@ if _RUN:
 **Main comparison.** Persistence sets the floor; LSTM answers whether the transformer is earning its complexity.
 """
 
+import dataclasses
+
+def cfg_for(name, base):
+    """Per-model config overrides, read from `<MODEL>_<FIELD>` env vars.
+
+    The sweep tunes each model separately, so its winners disagree on shared knobs
+    like lr. Rather than run the final comparison as three jobs and stitch the
+    predictions together, `LSTM_LR=3e-4 TRANSFORMER_LR=1e-3` lets one job give each
+    model its own winning config while every model still sees the identical split.
+    """
+    over = {}
+    for field, cast in Config.__annotations__.items():
+        raw = _os.environ.get(f"{name.upper()}_{field.upper()}")
+        if raw is None:
+            continue
+        over[field] = (raw.lower() in ("1", "true", "yes")) if cast is bool else cast(raw)
+    if not over:
+        return base
+    print(f"  {name} config overrides: {over}")
+    return dataclasses.replace(base, **over)
+
 if _RUN:
-    models = {"persistence": Persistence(cfg),
-              "lstm": LSTMForecaster(cfg),
-              "transformer": TransformerForecaster(cfg)}
-    results, histories = {}, {}
-    for name, m in models.items():
+    BUILDERS = {"persistence": Persistence, "lstm": LSTMForecaster,
+                "transformer": TransformerForecaster}
+    unknown = set(ONLY) - set(BUILDERS)
+    if unknown:
+        raise ValueError(f"ONLY names unknown models {sorted(unknown)}; "
+                         f"pick from {sorted(BUILDERS)}")
+    print(f"training models: {[k for k in BUILDERS if k in ONLY]}")
+
+    models, configs = {}, {}
+    results, histories, val_losses = {}, {}, {}
+    for name, build in BUILDERS.items():
+        if name not in ONLY:
+            continue
         print(f"--- {name} ---")
+        mcfg = configs[name] = cfg_for(name, cfg)
+        m = models[name] = build(mcfg)
+        # Only rebuild loaders when this model asked for a different batch size; the
+        # split itself is fixed, so the comparison stays like-for-like either way.
+        if mcfg.batch_size != cfg.batch_size:
+            tr, va, te = (make_loader(data, "train", shuffle=True, cfg=mcfg),
+                          make_loader(data, "val", cfg=mcfg),
+                          make_loader(data, "test", cfg=mcfg))
+        else:
+            tr, va, te = train_dl, val_dl, test_dl
         histories[name] = {}
-        m = train(m, train_dl, val_dl, cfg, verbose=False, history=histories[name])
-        pred, true = predict(m, test_dl)
+        m = train(m, tr, va, mcfg, verbose=False, history=histories[name])
+        val_losses[name] = getattr(m, "best_val_", float("nan"))
+        pred, true = predict(m, te)
         results[name] = (pred, true)
-        print(f"{name:12s} {metrics(pred, true)}")
+        print(f"{name:12s} best_val={val_losses[name]:.4e} {metrics(pred, true)}")
 
 """### Cell 9: Phase 4 — transit-sensitivity breakdown (the novelty claim)
 **Phase 4: the novelty claim.** Error broken out by transit vs quiet windows, plus dip-floor error vs true transit depth: does forecasting stay sensitive to *shallow* dips where classifiers fail?
@@ -438,13 +525,14 @@ if _RUN:
               f"{r['MAE_quiet']:>11.2e} {r['RMSE_transit']:>14.2e}")
 
     # depth-resolved error on transit windows: does the model see shallow dips?
-    depths = data["transit_depth"][test_m][has_transit]
-    pred_t, true_t = results["transformer"][0][has_transit], results["transformer"][1][has_transit]
-    depth_err = np.abs((true_t.min(1) - pred_t.min(1)))  # error in predicted dip floor
-    plt.figure(figsize=(4.5, 3))
-    plt.scatter(depths, depth_err, s=8, alpha=0.5)
-    plt.xlabel("true transit depth"); plt.ylabel("|dip-floor error|")
-    plt.title("Transformer: shallow-dip sensitivity"); plt.tight_layout(); plt.savefig("outputs/shallow_dip_sensitivity.png", dpi=150, bbox_inches="tight"); plt.close()
+    if "transformer" in results:
+        depths = data["transit_depth"][test_m][has_transit]
+        pred_t, true_t = results["transformer"][0][has_transit], results["transformer"][1][has_transit]
+        depth_err = np.abs((true_t.min(1) - pred_t.min(1)))  # error in predicted dip floor
+        plt.figure(figsize=(4.5, 3))
+        plt.scatter(depths, depth_err, s=8, alpha=0.5)
+        plt.xlabel("true transit depth"); plt.ylabel("|dip-floor error|")
+        plt.title("Transformer: shallow-dip sensitivity"); plt.tight_layout(); plt.savefig(out_path("outputs", "shallow_dip_sensitivity.png"), dpi=150, bbox_inches="tight"); plt.close()
 
 """### Cell 10: Qualitative plots + handoff to Vivek
 **Qualitative plots + handoff.** Prediction-vs-truth on the deepest-dip test windows, then artifacts saved for Vivek.
@@ -453,26 +541,41 @@ if _RUN:
 if _RUN:
     X_test = data["X"][test_m]
     dip_idxs = np.argsort(-data["transit_depth"][test_m])[:3]  # deepest-dip windows
-    for name in ["persistence", "transformer"]:
+    for name in [n for n in ("persistence", "transformer") if n in results]:
         pred, true = results[name]
         plot_examples(pred, true, X_test, dip_idxs, title=f"{name}: transit windows")
 
     import csv, json
-    with open("results_table.csv", "w", newline="") as f:
+    with open(out_path("results_table.csv"), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=rows[0].keys()); w.writeheader(); w.writerows(rows)
-    torch.save({"state_dict": models["transformer"].state_dict(), "config": vars(cfg)},
-               "transformer_best.pt")
+    if "transformer" in models:
+        torch.save({"state_dict": models["transformer"].state_dict(), "config": vars(cfg)},
+                   out_path("transformer_best.pt"))
 
     # tic_id and X ride along so evaluate.py can do the per-star breakdown and draw
     # the context leading into each forecast; history feeds the training curves.
-    np.savez("test_predictions.npz",
+    np.savez(out_path("test_predictions.npz"),
              **{f"pred_{k}": v[0] for k, v in results.items()},
-             true=results["transformer"][1],
+             true=next(iter(results.values()))[1],   # identical across models
              transit_depth=data["transit_depth"][test_m],
              tic_id=data["tic_id"][test_m],
              X=X_test)
-    with open("outputs/history.json", "w") as f:
+    with open(out_path("outputs", "history.json"), "w") as f:
         json.dump({k: v for k, v in histories.items() if v}, f)
-    print("saved: results_table.csv, transformer_best.pt, test_predictions.npz, "
-          "outputs/history.json")
+
+    # Machine-readable run record: collect_sweep.py ranks configs on val_loss without
+    # having to re-parse Slurm logs, and the final report cites the config that won.
+    with open(out_path("outputs", "run_summary.json"), "w") as f:
+        json.dump({"tag": _os.environ.get("TAG", ""),
+                   "data": npz_path,
+                   "device": DEVICE,
+                   "config": vars(cfg),
+                   "config_per_model": {k: vars(v) for k, v in configs.items()},
+                   "n_params": {k: int(sum(p.numel() for p in m.parameters()))
+                                for k, m in models.items()},
+                   "val_loss": val_losses,
+                   "epochs_run": {k: getattr(m, "epochs_run_", 0) for k, m in models.items()},
+                   "test": {r["model"]: r for r in rows}}, f, indent=2)
+    print(f"saved under {OUT}/: results_table.csv, transformer_best.pt, "
+          "test_predictions.npz, outputs/history.json, outputs/run_summary.json")
     print("run `python evaluate.py` for the full metric suite and figures  ->  Vivek")
