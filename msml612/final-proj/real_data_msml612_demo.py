@@ -389,13 +389,16 @@ def plot_examples(pred, true, X, idxs, title=""):
 """
 
 if _RUN:
-    tiny_stars = np.unique(data["tic_id"][data["split"] == "train"])[:5]
-    tiny_m = np.isin(data["tic_id"], tiny_stars)
-    tiny = {k: v[tiny_m] for k, v in data.items()}
-    tiny_dl = DataLoader(TensorDataset(torch.from_numpy(tiny["X"]), torch.from_numpy(tiny["y"])),
-                         batch_size=cfg.batch_size, shuffle=True)
-    print("tiny-subset overfit check (val_loss should drop steadily):")
-    _ = train(TransformerForecaster(cfg), tiny_dl, tiny_dl, cfg, max_epochs=8)
+    if _os.environ.get("SKIP_TINY") == "1":
+        print("skipping tiny-subset overfit check")
+    else:
+        tiny_stars = np.unique(data["tic_id"][data["split"] == "train"])[:5]
+        tiny_m = np.isin(data["tic_id"], tiny_stars)
+        tiny = {k: v[tiny_m] for k, v in data.items()}
+        tiny_dl = DataLoader(TensorDataset(torch.from_numpy(tiny["X"]), torch.from_numpy(tiny["y"])),
+                             batch_size=cfg.batch_size, shuffle=True)
+        print("tiny-subset overfit check (val_loss should drop steadily):")
+        _ = train(TransformerForecaster(cfg), tiny_dl, tiny_dl, cfg, max_epochs=8)
 
 """### Cell 8: Train all models, shared results table
 **Main comparison.** Persistence sets the floor; LSTM answers whether the transformer is earning its complexity.
