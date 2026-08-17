@@ -237,20 +237,31 @@ def make_tess_windows(
     return load_from_ronoy(out_path)
 
 if _RUN:
-    # zaratan_handoff.py writes data/tess_windows.npz; the older local build wrote
-    # it beside this script. DATA can override both for named runs such as run_two.
+    # Search order matches where the handoff actually lands: run_two/data is the
+    # current run, then zaratan_handoff.py's data/, then the older local build that
+    # wrote beside this script. DATA overrides all three for other named runs.
     npz_path = _os.environ.get("DATA")
     if npz_path and not os.path.exists(npz_path):
         raise FileNotFoundError(f"DATA points to missing handoff file: {npz_path}")
     if not npz_path:
-        npz_path = next((p for p in ("data/tess_windows.npz", "tess_windows.npz")
-                         if os.path.exists(p)), "tess_windows.npz")
+        npz_path = next((p for p in ("run_two/data/tess_windows.npz",
+                                     "data/tess_windows.npz", "tess_windows.npz")
+                         if os.path.exists(p)), "run_two/data/tess_windows.npz")
 
     if os.path.exists(npz_path):
         print(f"loading handoff file: {npz_path}")
         data = load_from_ronoy(npz_path)
-    else:
+    elif _os.environ.get("SYNTHETIC") == "1":
+        # Standalone demo mode only. Real runs must train on the handoff file, so
+        # synthesizing is opt-in: falling through to it silently would quietly
+        # publish results that were never fit to TESS data at all.
+        print(f"SYNTHETIC=1: building synthetic windows at {npz_path}")
         data = make_tess_windows(npz_path)
+    else:
+        raise FileNotFoundError(
+            f"handoff file not found: {npz_path}. Point DATA at it "
+            "(DATA=run_two/data/tess_windows.npz), or set SYNTHETIC=1 to run the "
+            "standalone synthetic demo.")
 
     print({k: v.shape for k, v in data.items()})
 

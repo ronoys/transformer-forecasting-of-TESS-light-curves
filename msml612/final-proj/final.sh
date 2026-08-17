@@ -34,7 +34,7 @@ OUT_DIR=${OUT_DIR:-run_two}
 
 mkdir -p logs "$OUT_DIR/outputs"
 
-DATA=${DATA:-data/tess_windows.npz}
+DATA=${DATA:-run_two/data/tess_windows.npz}
 if [ ! -f "$DATA" ]; then
   echo "ERROR: $DATA not found. Build it first (see RUN_TWO.md)." >&2
   exit 1

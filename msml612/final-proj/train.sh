@@ -1,5 +1,5 @@
 #!/bin/bash
-# GPU training job. tess.sh builds data/tess_windows.npz on a CPU node; this trains
+# GPU training job. tess.sh builds the windows npz on a CPU node; this trains
 # on it and then runs the full metric/figure pass.
 #
 #   sbatch train.sh
@@ -27,7 +27,7 @@ set -euo pipefail
 
 mkdir -p logs outputs
 
-DATA=${DATA:-data/tess_windows.npz}
+DATA=${DATA:-run_two/data/tess_windows.npz}
 if [ ! -f "$DATA" ]; then
   # Compute nodes have no outbound internet, so the build cannot be rescued here.
   echo "ERROR: $DATA not found. Run the data build first:  sbatch tess.sh" >&2

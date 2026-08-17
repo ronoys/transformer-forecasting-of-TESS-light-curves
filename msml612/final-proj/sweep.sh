@@ -84,7 +84,7 @@ TAG="cfg$(printf '%02d' "$SLURM_ARRAY_TASK_ID")"
 
 mkdir -p logs "sweep/$TAG"
 
-DATA=${DATA:-data/tess_windows.npz}
+DATA=${DATA:-run_two/data/tess_windows.npz}
 if [ ! -f "$DATA" ]; then
   echo "ERROR: $DATA not found. Build it first (see RUN_TWO.md)." >&2
   exit 1
