@@ -1,0 +1,92 @@
+{
+  "tag": "cfg06",
+  "data": "run_two/data/tess_windows.npz",
+  "device": "cuda",
+  "config": {
+    "input_len": 256,
+    "target_len": 32,
+    "d_model": 64,
+    "n_heads": 4,
+    "n_layers": 3,
+    "ff_dim": 128,
+    "dropout": 0.1,
+    "lstm_hidden": 64,
+    "batch_size": 128,
+    "lr": 0.001,
+    "weight_decay": 0.01,
+    "max_epochs": 30,
+    "patience": 5,
+    "use_huber": true,
+    "flux_scale": 1000.0,
+    "anchor": false,
+    "pool": "last"
+  },
+  "config_per_model": {
+    "persistence": {
+      "input_len": 256,
+      "target_len": 32,
+      "d_model": 64,
+      "n_heads": 4,
+      "n_layers": 3,
+      "ff_dim": 128,
+      "dropout": 0.1,
+      "lstm_hidden": 64,
+      "batch_size": 128,
+      "lr": 0.001,
+      "weight_decay": 0.01,
+      "max_epochs": 30,
+      "patience": 5,
+      "use_huber": true,
+      "flux_scale": 1000.0,
+      "anchor": false,
+      "pool": "last"
+    },
+    "transformer": {
+      "input_len": 256,
+      "target_len": 32,
+      "d_model": 64,
+      "n_heads": 4,
+      "n_layers": 3,
+      "ff_dim": 128,
+      "dropout": 0.1,
+      "lstm_hidden": 64,
+      "batch_size": 128,
+      "lr": 0.001,
+      "weight_decay": 0.01,
+      "max_epochs": 30,
+      "patience": 5,
+      "use_huber": true,
+      "flux_scale": 1000.0,
+      "anchor": false,
+      "pool": "last"
+    }
+  },
+  "n_params": {
+    "persistence": 0,
+    "transformer": 102624
+  },
+  "val_loss": {
+    "persistence": 200.80762441841128,
+    "transformer": 142.77448241314391
+  },
+  "epochs_run": {
+    "persistence": 0,
+    "transformer": 14
+  },
+  "test": {
+    "persistence": {
+      "model": "persistence",
+      "MAE_all": 0.18031175434589386,
+      "MAE_transit": 0.18505536019802094,
+      "MAE_quiet": 0.0027287660632282495,
+      "RMSE_transit": 0.988010048866272
+    },
+    "transformer": {
+      "model": "transformer",
+      "MAE_all": 0.12755493819713593,
+      "MAE_transit": 0.13078810274600983,
+      "MAE_quiet": 0.006517951376736164,
+      "RMSE_transit": 0.6974672675132751
+    }
+  }
+}
