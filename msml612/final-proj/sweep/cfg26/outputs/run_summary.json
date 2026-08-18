@@ -1,0 +1,92 @@
+{
+  "tag": "cfg26",
+  "data": "run_two/data/tess_windows.npz",
+  "device": "cuda",
+  "config": {
+    "input_len": 256,
+    "target_len": 32,
+    "d_model": 128,
+    "n_heads": 8,
+    "n_layers": 4,
+    "ff_dim": 256,
+    "dropout": 0.1,
+    "lstm_hidden": 64,
+    "batch_size": 128,
+    "lr": 0.001,
+    "weight_decay": 0.01,
+    "max_epochs": 30,
+    "patience": 5,
+    "use_huber": true,
+    "flux_scale": 1000.0,
+    "anchor": true,
+    "pool": "meanlast"
+  },
+  "config_per_model": {
+    "persistence": {
+      "input_len": 256,
+      "target_len": 32,
+      "d_model": 128,
+      "n_heads": 8,
+      "n_layers": 4,
+      "ff_dim": 256,
+      "dropout": 0.1,
+      "lstm_hidden": 64,
+      "batch_size": 128,
+      "lr": 0.001,
+      "weight_decay": 0.01,
+      "max_epochs": 30,
+      "patience": 5,
+      "use_huber": true,
+      "flux_scale": 1000.0,
+      "anchor": true,
+      "pool": "meanlast"
+    },
+    "transformer": {
+      "input_len": 256,
+      "target_len": 32,
+      "d_model": 128,
+      "n_heads": 8,
+      "n_layers": 4,
+      "ff_dim": 256,
+      "dropout": 0.1,
+      "lstm_hidden": 64,
+      "batch_size": 128,
+      "lr": 0.001,
+      "weight_decay": 0.01,
+      "max_epochs": 30,
+      "patience": 5,
+      "use_huber": true,
+      "flux_scale": 1000.0,
+      "anchor": true,
+      "pool": "meanlast"
+    }
+  },
+  "n_params": {
+    "persistence": 0,
+    "transformer": 538400
+  },
+  "val_loss": {
+    "persistence": 200.80762441841128,
+    "transformer": 142.5305432719025
+  },
+  "epochs_run": {
+    "persistence": 0,
+    "transformer": 13
+  },
+  "test": {
+    "persistence": {
+      "model": "persistence",
+      "MAE_all": 0.18031175434589386,
+      "MAE_transit": 0.18505536019802094,
+      "MAE_quiet": 0.0027287660632282495,
+      "RMSE_transit": 0.988010048866272
+    },
+    "transformer": {
+      "model": "transformer",
+      "MAE_all": 0.1275789737701416,
+      "MAE_transit": 0.13084125518798828,
+      "MAE_quiet": 0.005450214259326458,
+      "RMSE_transit": 0.6969837546348572
+    }
+  }
+}
