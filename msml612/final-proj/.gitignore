@@ -4,3 +4,6 @@ __pycache__/
 .venv-train/
 logs/
 sweep/
+demo/
+demo_handoff/
+demo_outputs/
